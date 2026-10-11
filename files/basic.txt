@@ -1,0 +1,5 @@
+Hello, world!
+This is line two.
+
+Line four after an empty line.
+last line ends with a newline
