@@ -1,13 +1,20 @@
 # get_next_line tests
 
-Tests for `get_next_line`, the mandatory part and the bonus part. The suite has two parts:
+Tests for `get_next_line`, the mandatory part and the bonus part. The suite has three parts:
 
 - **An interactive reader (`./test`)**: you give it file descriptors that you
   opened in your shell, and it prints every line `get_next_line` returns.
-- **An automatic suite** (`make test`, `make bonus`, `make valgrind`, …). It
-  compiles your files with many `BUFFER_SIZE` values and runs about 45
-  test cases on them. Each case runs in its own process, so a crash or an
-  infinite loop fails only that case.
+- **C tests** (`tests/*.c`): your files are compiled with many `BUFFER_SIZE`
+  values and run through 40 mandatory and 19 bonus cases. Each case runs
+  in its own process, so a crash or an infinite loop fails only that case.
+- **Program tests** (in `run_tests.sh`): the reader is built from your files
+  and run from the shell, the way an evaluator would: fds opened with
+  `exec 3< file`, several programs reading the same fd one after the other,
+  a file appended between two programs, a slow writer on a pipe, a binary
+  file.
+
+`make test`, `make bonus` and `make valgrind` run the C tests and the program
+tests together.
 
 The tests compile your `.c` files directly. They never change them.
 
@@ -25,10 +32,11 @@ get_next_line/
 └── gnl_test/
     ├── Makefile
     ├── main.c            <- the interactive reader (./test)
-    ├── run_tests.sh      <- checks + builds and runs the suites per BUFFER_SIZE
+    ├── run_tests.sh      <- checks, C suites and program tests per BUFFER_SIZE
     ├── test.h            <- CHECK macros
     ├── test_utils.c      <- runner: fork per case, timeout, crash detection
-    ├── gnl_utils.c/.h    <- malloc/free/read wrappers, file & pipe helpers
+    ├── gnl_utils.c/.h    <- malloc/free/read wrappers, file & pipe helpers,
+    │                        child_reads() (a program that reads x lines, exits)
     ├── tests/
     │   ├── test_mandatory.c   <- single-fd behaviour (mandatory part)
     │   ├── test_bonus.c       <- several fds at once (bonus part)
@@ -52,17 +60,20 @@ Run these from inside `gnl_test/`:
 | `make` | Builds `./test` from the mandatory files (`BUFFER_SIZE=42`) |
 | `make BUFFER_SIZE=1` | The same, with a different buffer size |
 | `make main_bonus` | Builds `./test_bonus` from the `_bonus` files (several fds at once) |
-| `make test` | Checks + mandatory tests, for every buffer size |
-| `make bonus` | Everything in `make test`, then the checks, mandatory tests and multi-fd tests on the `_bonus` files |
+| `make test` (or `make mandatory`) | Checks, mandatory C tests and program tests, for every buffer size |
+| `make bonus` | Everything in `make test`, then the same on the `_bonus` files, plus the multi-fd tests |
+| `make program` | Only the program tests (mandatory files) |
 | `make valgrind` | `make test` under valgrind |
 | `make valgrind_bonus` | `make bonus` under valgrind |
+| `make valgrind_program` | `make program` under valgrind |
 | `make clean` / `make fclean` | Deletes `bin/` / also deletes `./test` and `./test_bonus` |
+| `make remove` | Deletes the whole tester folder (do this before you submit). Afterwards, `cd ..` |
 
 Environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BUFFER_SIZES` | `1 2 3 7 42 1024 9999 10000000` (valgrind: `1 42 9999`) | Buffer sizes the suites are compiled with |
+| `BUFFER_SIZES` | `default 1 2 3 7 42 1024 9999 10000000` (valgrind: `1 42 9999`) | Buffer sizes the suites are compiled with. `default` compiles **without** `-D BUFFER_SIZE`, so your header's value is used |
 | `TEST_TIMEOUT` | `5` (valgrind: `60`) | Seconds before a case is killed |
 | `GNL_DIR` | `..` | Where your files are |
 
@@ -84,7 +95,7 @@ The differences:
 
 | | `make` | `run_tests.sh` |
 |---|---|---|
-| Choosing the suite | target: `test`, `bonus`, `valgrind`, `valgrind_bonus` | argument: `mandatory` or `bonus` |
+| Choosing the suite | target: `test`, `bonus`, `program`, `valgrind`, … | argument: `mandatory`, `bonus` or `program` |
 | Valgrind | `make valgrind` sets the valgrind command, the 60 s timeout and the smaller buffer sizes for you | you set `RUNNER="valgrind ..."` yourself |
 | Settings | `make test BUFFER_SIZES="1 42"` | `BUFFER_SIZES="1 42" ./run_tests.sh` |
 | When tests fail | adds a `make: *** ... Error 1` line | only the test output |
@@ -194,6 +205,8 @@ For the mandatory files, and also for the bonus files with `make bonus`:
   reported
 - no global variables. File-scope `static` variables count as globals
 - bonus: exactly **one** static variable
+- `norminette` on your files, if it is installed (otherwise `[!!]` and
+  the Norm is not checked)
 
 ### 2. Mandatory tests (`tests/test_mandatory.c`)
 
@@ -210,6 +223,12 @@ Run once for each `BUFFER_SIZE`:
 | stdin / pipes | stdin redirected from a file and from a pipe, data arriving in small delayed chunks, 10 000 lines through a pipe (more than the 64 KiB a pipe holds) |
 | Economy | **returns a line without waiting for EOF**: the writer sends `"first\n"` and then waits, and if `get_next_line` calls `read()` again it blocks and the case times out. **Does not read the whole file**: after the first call, `read()` may only have returned the chunks needed to reach the first `\n` |
 | Ownership | each returned line is a separate buffer: you can modify it or free it in any order |
+| Malloc failure (strict) | for every `malloc` in turn: when that call returns `NULL`, nothing may still be allocated **right then**, even if the caller never calls `get_next_line` again |
+| Stopping early | read x lines (x = 0..6), stop, close the fd: further calls may only return lines that were already buffered, in order, then `NULL`, and nothing may leak. Then a new file reads cleanly |
+| A program exits early | a child process reads x lines and calls `exit()`: no crash, the right lines (under valgrind: no definite leak in the child) |
+| Several programs, one fd | one fd (a file, then stdin) is read by 8 child processes in a row, 3 lines each, like `exec 3< f; ./prog 3; ./prog 3`. Program k must print the 3 lines starting at the fd's current offset (what the previous one buffered is gone), and must not read further than those 3 lines need |
+| Writing while reading | a pipe whose write end the test keeps open and writes into between calls; **(extra)** a file appended by another fd while it is read and after EOF (like `tail -f`); **(extra)** one `O_RDWR` fd: read to EOF, write new lines through the same fd, seek back, read them |
+| Programs and binaries | a compiled binary (`/bin/true`): `'\0'` bytes and long lines must not crash, hang or leak, and it must end with `NULL`; the output of a running `sh` loop (2000 lines) through a pipe |
 
 Every case also checks that **nothing allocated by `get_next_line` is
 still allocated** once it has returned `NULL`. That includes a static
@@ -240,6 +259,38 @@ The **whole mandatory suite** runs again on the `_bonus` files. Then:
 | high fd numbers | fd 1023 works (a `stash[FOPEN_MAX]` table of 16 is too small); fd 1024, 100000 and `INT_MAX` return `NULL` without crashing |
 | malloc failure on one fd | the other fd keeps its state, nothing leaks |
 | two slow pipes | short reads on two fds, interleaved |
+| malloc failures, round robin | 3 fds read in turn while `malloc` 1, 2, 3, … fails: only the fd whose call failed may lose lines; the others continue with exactly the right lines; no leak |
+| stop early on 2 fds | read some lines of a and b, close both, keep reading c: c is unaffected, a and b only give their own buffered lines, then `NULL`, no leak |
+| a program reads 2 fds and exits | a child reads x lines of each of 2 fds in turn and exits |
+| 2 fds, 8 programs | 2 fds shared by 8 child processes in a row; each fd must continue from its own offset |
+| 2 pipes written between calls | the test writes into both pipes between calls |
+| (extra) 2 files appended | both files get new lines while open and after EOF |
+| same file opened twice | 2 fds on the same path: each returns the whole file |
+
+### 5. Program tests (`run_tests.sh`, also `make program`)
+
+For every buffer size, `main.c` is compiled with your files (like `make`)
+and run from the shell:
+
+| Case | Command (roughly) | Expected |
+|---|---|---|
+| every sample file | `./test -r 3 3< files/X.txt` | output identical to the file (`cmp`) |
+| stdin, pipe | `./test -r < f`, `cat f \| ./test -r` | identical to the file |
+| stops early | `./test -r -n x 3 3< f` (x = 1, 3, 10) | the first x lines; exit 0 |
+| 5 programs, one fd | `{ ./test -n 3 3; ./test -n 3 3; … } 3< f` | each program prints the 3 lines starting at the fd offset the shell sees in `/proc/$$/fdinfo/3`. With `BUFFER_SIZE=1` the 5 outputs together are exactly the first 15 lines |
+| slow writer | `{ printf 'first\n'; sleep 0.2; printf 'sec'; …; } \| ./test -r` | `first\nsecond\nthird` |
+| append between programs | `{ ./test -r 3; printf 'three\nfour' >> f; ./test -r 3; } 3< f` | the second program prints only the new lines |
+| binary file | `./test -r < ./test` | no crash, no hang (no leak under valgrind) |
+| bonus: round robin | `./test_bonus -r 3 4 5 3< a 4< b 5< c` | one line of each file in turn |
+| bonus: same file twice | `./test_bonus -r 3 4 3< f 4< f` | every line twice |
+| bonus: lengths, `-n` | 3 fds of very different lengths; `-n 2` on 2 fds | |
+
+Under `make valgrind*`, a program that reads to EOF is run with
+`--errors-for-leak-kinds=all`: like Sfabi's tester, every heap block must
+be freed ("All heap blocks were freed"). A program that stops early may
+leave its stash *still reachable*, so only definite/indirect/possible leaks
+fail those cases. Files with a line over 20 000 chars are skipped under
+valgrind for `BUFFER_SIZE` 1 and 2 (`[SKIP]`): they take minutes there.
 
 ## How it works
 
@@ -270,6 +321,9 @@ mandatory: 28/31 passed
 ```
 
 - **[OK]**: the case passed.
+- **[SKIP]**: the case was not run, the line underneath says why (e.g. the
+  open file limit is too low for fd 1023). It counts as neither passed nor
+  failed.
 - **[KO]**: the case failed. The `->` lines give the expected and the
   actual line. Non-printable bytes appear as `\xNN`.
 - **-> SEGFAULT / ABORT**: your code crashed. ABORT usually means a double
@@ -291,6 +345,17 @@ mandatory: 28/31 passed
 The summary at the end lists each suite by name, with the buffer size in
 brackets (`mandatory[42]`). `make test` / `make bonus` exit non-zero if
 anything failed.
+
+## What the labels mean
+
+- **(strict)**: goes beyond the subject, but strict testers check it. The
+  subject says to return `NULL` on error; strict testers also require that
+  nothing is left allocated at that moment.
+- **(extra)**: behaviour the subject doesn't mention, but that a sound
+  implementation has anyway: a file that grows after `get_next_line`
+  returned `NULL` (like `tail -f`), or an `O_RDWR` fd written to and seeked
+  back. A KO here usually means a static "EOF reached" flag or a stash that
+  isn't reset.
 
 ## Tips
 
@@ -321,3 +386,9 @@ anything failed.
 The test suite was generated with AI (Claude, through Claude Code), using
 the structure of the libft tests in `Milestone0/libft Test`. It is used to
 check get_next_line and is not part of the submitted project.
+
+Some cases were added after comparing with
+[Sfabi28/gnl_tester](https://github.com/Sfabi28/gnl_tester): building
+without `-D BUFFER_SIZE` (`default`), the same file opened on 2 fds,
+the norminette check, and valgrind requiring every block to be freed when a
+program reads to EOF.

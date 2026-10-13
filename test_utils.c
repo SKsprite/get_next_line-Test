@@ -12,9 +12,28 @@
 /* Failures printed per case before the rest are summarised. */
 #define MAX_REPORTED 10
 
+/* Exit status a case uses to report itself as skipped. */
+#define SKIP_STATUS 77
+
 int			g_case_failures = 0;
 static int	g_passed = 0;
 static int	g_failed = 0;
+static int	g_skipped = 0;
+
+int	under_valgrind(void)
+{
+	const char	*preload;
+
+	preload = getenv("LD_PRELOAD");
+	return (preload && strstr(preload, "vgpreload") != NULL);
+}
+
+void	skip_case(const char *why)
+{
+	printf("      " YELLOW "-> " RESET "%s\n", why);
+	fflush(stdout);
+	_exit(SKIP_STATUS);
+}
 
 const char	*show(const void *buf, size_t n)
 {
@@ -167,6 +186,11 @@ void	run_case(const char *name, void (*fn)(void))
 		g_passed++;
 		printf("  " GREEN "[OK]" RESET " %s\n", name);
 	}
+	else if (WIFEXITED(status) && WEXITSTATUS(status) == SKIP_STATUS)
+	{
+		g_skipped++;
+		printf("  " YELLOW "[SKIP]" RESET " %s\n", name);
+	}
 	else
 	{
 		g_failed++;
@@ -188,7 +212,10 @@ void	run_case(const char *name, void (*fn)(void))
 
 int	finish(const char *title)
 {
-	printf("%s%s: %d/%d passed" RESET "\n\n",
-		g_failed ? RED : GREEN, title, g_passed, g_passed + g_failed);
+	printf("%s%s: %d/%d passed" RESET, g_failed ? RED : GREEN, title,
+		g_passed, g_passed + g_failed);
+	if (g_skipped)
+		printf(YELLOW " (%d skipped)" RESET, g_skipped);
+	printf("\n\n");
 	return (g_failed != 0);
 }

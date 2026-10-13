@@ -1,6 +1,7 @@
 #include "gnl_utils.h"
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 /*
 ** Splits `content` into the lines get_next_line must return: each line ends
@@ -485,6 +486,350 @@ static void	every_malloc_fails_in_turn(void)
 	close(fd);
 }
 
+static void	strict_malloc_failure_frees_stash(void)
+{
+	/*
+	** (strict) After the call where malloc fails returns NULL, nothing may be
+	** left allocated, even if the caller never calls get_next_line again.
+	*/
+	const char	*content = "first line\nsecond line is longer\n\nend";
+	char		*line;
+	int			fd;
+	int			triggered;
+
+	for (long n = 1; n < 500; n++)
+	{
+		fd = open_str(content);
+		fail_malloc_at(n);
+		for (int i = 0; i < 5; i++)
+		{
+			line = gnl(fd);
+			if (malloc_failed())
+			{
+				CHECK(line || gnl_live_blocks() == 0, "malloc %ld failed and "
+					"get_next_line returned NULL, but %zu block(s) are still "
+					"allocated (stash not freed on error)", n, gnl_live_blocks());
+				free(line);
+				break ;
+			}
+			if (!line)
+				break ;
+			free(line);
+		}
+		triggered = malloc_failed();
+		fail_malloc_at(0);
+		drain(fd, 100);
+		close(fd);
+		if (!triggered || g_case_failures)
+			break ;
+	}
+}
+
+/* -------------------------------------------- stopping early, exiting */
+
+#define SIX_LINES "line 1\nline 2 is longer\n\nline 4\nline 5\nline 6 no newline"
+
+static void	stop_early_then_close(void)
+{
+	/*
+	** Read x lines, stop, close the fd. Further calls on the closed fd may
+	** only return lines that were already buffered (the next ones, in
+	** order), then NULL, and must free everything.
+	*/
+	const char	*lines[] = {"line 1\n", "line 2 is longer\n", "\n", "line 4\n",
+		"line 5\n", "line 6 no newline"};
+	char		*got;
+	int			fd;
+	int			next;
+
+	for (int x = 0; x <= 6 && !g_case_failures; x++)
+	{
+		fd = open_str(SIX_LINES);
+		for (int i = 0; i < x; i++)
+			expect_line(fd, lines[i]);
+		close(fd);
+		next = x;
+		while ((got = gnl(fd)) != NULL && !g_case_failures)
+		{
+			CHECK(next < 6 && strcmp(got, lines[next]) == 0, "stopped after %d "
+				"line(s) and closed the fd: next call returned %s, expected %s "
+				"or NULL", x, show_str(got), next < 6 ? show_str(lines[next])
+				: "NULL");
+			free(got);
+			next++;
+		}
+		free(got);
+		CHECK_NO_LEAK("after stopping early, closing and reaching NULL");
+	}
+	fd = open_str("fresh file\n");
+	EXPECT_LINES(fd, "fresh file\n");
+	close(fd);
+}
+
+static void	child_reads_some_and_exits(void)
+{
+	/*
+	** A program reads x lines and exits without reaching EOF. It must not
+	** crash, and it must have printed the right lines. (Under valgrind, the
+	** child's lines must also all be freed: definite leaks fail the case.)
+	*/
+	int		fd;
+	int		status;
+	char	*out;
+	char	*exp;
+
+	for (int x = 1; x <= 6; x++)
+	{
+		fd = open_str(SIX_LINES);
+		status = child_reads(&fd, 1, x, &out);
+		exp = first_lines(SIX_LINES, x);
+		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+			"program reading %d line(s): %s", x, status_str(status));
+		CHECK(strcmp(out, exp) == 0, "program reading %d line(s) printed %s, "
+			"expected %s", x, show_str(out), show_str(exp));
+		free(out);
+		free(exp);
+		close(fd);
+	}
+}
+
+static char	*numbered_lines(int n, int with_tail)
+{
+	char	*s;
+	size_t	len;
+
+	s = malloc((size_t)n * 48 + 32);
+	len = 0;
+	for (int i = 0; i < n; i++)
+		len += (size_t)sprintf(s + len, "line %d%.*s\n", i, i % 23,
+			"..........................");
+	if (with_tail)
+		strcpy(s + len, "no newline at the end");
+	else
+		s[len] = '\0';
+	return (s);
+}
+
+static void	several_programs_same_fd_at(int fd, const char *content,
+				const char *what)
+{
+	size_t	size;
+	size_t	bs;
+	off_t	off;
+	off_t	after;
+	size_t	limit;
+	int		status;
+	char	*out;
+	char	*exp;
+
+	size = strlen(content);
+	bs = BUFFER_SIZE;
+	for (int run = 1; run <= 8 && !g_case_failures; run++)
+	{
+		off = lseek(fd, 0, SEEK_CUR);
+		status = child_reads(&fd, 1, 3, &out);
+		after = lseek(fd, 0, SEEK_CUR);
+		exp = first_lines(content + off, 3);
+		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+			"%s, program %d: %s", what, run, status_str(status));
+		CHECK(strcmp(out, exp) == 0, "%s, program %d (fd offset was %ld): "
+			"printed %s, expected %s", what, run, (long)off, show_str(out),
+			show_str(exp));
+		limit = (size_t)off + ((strlen(exp) + bs - 1) / bs) * bs;
+		if (limit > size)
+			limit = size;
+		CHECK((size_t)after <= limit, "%s, program %d read the fd from offset "
+			"%ld to %ld, but its 3 lines only needed up to %zu (it read more "
+			"than it needed)", what, run, (long)off, (long)after, limit);
+		free(out);
+		free(exp);
+	}
+}
+
+static void	several_programs_same_fd(void)
+{
+	/*
+	** One fd shared by programs run one after the other (like
+	** `exec 3< file; ./prog 3; ./prog 3`). Each program reads 3 lines and
+	** exits. The lines it buffered but didn't return are lost with it, so
+	** program k must print the 3 lines that start where the fd offset was.
+	** With BUFFER_SIZE=1 nothing is lost.
+	*/
+	char	*content;
+	int		fd;
+
+	content = numbered_lines(30, 1);
+	fd = open_str(content);
+	several_programs_same_fd_at(fd, content, "regular file");
+	close(fd);
+	fd = open_str(content);
+	dup2(fd, STDIN_FILENO);
+	close(fd);
+	several_programs_same_fd_at(STDIN_FILENO, content, "stdin");
+	free(content);
+}
+
+/* ------------------------------------------ writing while the fd is open */
+
+static void	pipe_written_between_calls(void)
+{
+	/*
+	** The test keeps the write end of the pipe and writes between calls, so
+	** the fd stays open the whole time (no EOF until the end).
+	*/
+	int	p[2];
+
+	if (pipe(p) < 0)
+		exit(2);
+	write_str(p[1], "one\n");
+	expect_line(p[0], "one\n");
+	write_str(p[1], "tw");
+	write_str(p[1], "o\nthree\n");
+	expect_line(p[0], "two\n");
+	expect_line(p[0], "three\n");
+	write_str(p[1], "fo");
+	write_str(p[1], "ur\n");
+	expect_line(p[0], "four\n");
+	write_str(p[1], "\n");
+	expect_line(p[0], "\n");
+	write_str(p[1], "last, no newline");
+	close(p[1]);
+	EXPECT_LINES(p[0], "last, no newline");
+	close(p[0]);
+	CHECK_NO_LEAK("after EOF");
+}
+
+static void	file_appended_while_open(void)
+{
+	/*
+	** Another fd appends to the file while it is being read: before EOF the
+	** new lines are simply part of the file; after EOF (NULL), the next call
+	** returns what was added since (like `tail -f`).
+	*/
+	char	path[64];
+	int		fd;
+
+	make_tmp_file(path, "a\nb\n");
+	fd = open(path, O_RDONLY);
+	expect_line(fd, "a\n");
+	append_str(path, "c\n");
+	expect_line(fd, "b\n");
+	expect_line(fd, "c\n");
+	expect_line(fd, NULL);
+	CHECK_NO_LEAK("at EOF");
+	append_str(path, "d\npartial");
+	expect_line(fd, "d\n");
+	expect_line(fd, "partial");
+	expect_line(fd, NULL);
+	append_str(path, " more\n");
+	EXPECT_LINES(fd, " more\n");
+	close(fd);
+	unlink(path);
+	CHECK_NO_LEAK("after EOF");
+}
+
+static void	same_fd_read_and_write(void)
+{
+	/*
+	** One O_RDWR fd: read to EOF, write new lines through the same fd, seek
+	** back to them and read them; then seek to 0 and read it all again.
+	*/
+	char	path[64];
+	int		fd;
+
+	make_tmp_file(path, "x\ny\n");
+	fd = open(path, O_RDWR);
+	EXPECT_LINES(fd, "x\n", "y\n");
+	write_str(fd, "z\nw\n");
+	lseek(fd, -4, SEEK_CUR);
+	EXPECT_LINES(fd, "z\n", "w\n");
+	lseek(fd, 0, SEEK_SET);
+	EXPECT_LINES(fd, "x\n", "y\n", "z\n", "w\n");
+	close(fd);
+	unlink(path);
+	CHECK_NO_LEAK("after EOF");
+}
+
+/* ------------------------------------------------ programs and binaries */
+
+static void	binary_file(void)
+{
+	/*
+	** A compiled program: '\0' bytes, long runs without '\n'. The lines are
+	** C strings, so what follows a '\0' can't be seen by the caller, but
+	** get_next_line must not crash, hang or leak, and must end with NULL.
+	*/
+	const char	*paths[] = {"/bin/true", "/usr/bin/true", "/bin/ls"};
+	int			fd;
+	char		buf[4096];
+	ssize_t		r;
+	size_t		newlines;
+	size_t		calls;
+	char		*line;
+
+	fd = -1;
+	for (size_t i = 0; i < 3 && fd < 0; i++)
+		fd = open(paths[i], O_RDONLY);
+	if (fd < 0)
+		skip_case("no /bin/true, /usr/bin/true or /bin/ls to read");
+	newlines = 0;
+	while ((r = read(fd, buf, sizeof(buf))) > 0)
+		for (ssize_t i = 0; i < r; i++)
+			newlines += (buf[i] == '\n');
+	lseek(fd, 0, SEEK_SET);
+	line = gnl(fd);
+	CHECK(line && strncmp(line, "\x7f" "ELF", 4) == 0,
+		"first line should start with \"\\x7fELF\", got %s", show_str(line));
+	calls = 1;
+	while (line && calls <= newlines + 2)
+	{
+		free(line);
+		line = gnl(fd);
+		calls++;
+	}
+	CHECK(line == NULL, "still returning lines after %zu calls, but the file "
+		"has only %zu '\\n'", calls, newlines);
+	free(line);
+	expect_line(fd, NULL);
+	close(fd);
+	CHECK_NO_LEAK("after EOF");
+}
+
+static void	program_output_through_pipe(void)
+{
+	/* The output of a running program (sh), read while it is writing. */
+	int		p[2];
+	pid_t	pid;
+	char	exp[64];
+	char	*got;
+
+	if (pipe(p) < 0 || (pid = fork()) < 0)
+		exit(2);
+	if (pid == 0)
+	{
+		close(p[0]);
+		dup2(p[1], STDOUT_FILENO);
+		close(p[1]);
+		execl("/bin/sh", "sh", "-c", "i=0; while [ $i -lt 2000 ]; do "
+			"echo \"output line $i\"; i=$((i+1)); done; printf 'done'",
+			(char *)NULL);
+		_exit(127);
+	}
+	close(p[1]);
+	for (int i = 0; i < 2000 && !g_case_failures; i++)
+	{
+		sprintf(exp, "output line %d\n", i);
+		got = gnl(p[0]);
+		CHECK(got && strcmp(got, exp) == 0, "line %d: expected %s, got %s", i,
+			show_str(exp), show_str(got));
+		free(got);
+	}
+	EXPECT_LINES(p[0], "done");
+	close(p[0]);
+	waitpid(pid, NULL, 0);
+	CHECK_NO_LEAK("after EOF");
+}
+
 static void	reused_fd_number_starts_clean(void)
 {
 	/*
@@ -703,6 +1048,8 @@ int	main(void)
 		every_read_fails_in_turn);
 	run_case("every malloc() fails in turn: no crash, no leak",
 		every_malloc_fails_in_turn);
+	run_case("(strict) malloc fails -> NULL and the stash is freed at once",
+		strict_malloc_failure_frees_stash);
 	run_case("closed fd number reused by a new file starts clean",
 		reused_fd_number_starts_clean);
 	run_case("stdin redirected from a file", stdin_from_file);
@@ -716,6 +1063,21 @@ int	main(void)
 		does_not_read_whole_file);
 	run_case("returned lines are separate, caller-owned buffers",
 		lines_are_independent);
+	run_case("read x lines, stop, close: no leak, no stale lines",
+		stop_early_then_close);
+	run_case("a program reads x lines and exits", child_reads_some_and_exits);
+	run_case("one fd read by 8 programs in a row (file and stdin)",
+		several_programs_same_fd);
+	run_case("pipe written between calls (fd stays open)",
+		pipe_written_between_calls);
+	run_case("(extra) file appended while open and after EOF (tail -f)",
+		file_appended_while_open);
+	run_case("(extra) same O_RDWR fd: read, write, seek back, read",
+		same_fd_read_and_write);
+	run_case("binary file (a compiled program): no crash, hang or leak",
+		binary_file);
+	run_case("output of a running program (sh) through a pipe",
+		program_output_through_pipe);
 #ifdef GNL_BONUS
 	return (finish("mandatory (bonus files)"));
 #else

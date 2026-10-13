@@ -39,6 +39,30 @@ int		open_pipe_str(const char *s);
 /* Same, but the chunks arrive one by one, delay_us apart. */
 int		open_pipe_chunks(const char **chunks, size_t n, unsigned delay_us);
 
+/*
+** A real file with a path (so other fds can be opened on it later). Remove
+** it with unlink(path) at the end of the case.
+*/
+void	make_tmp_file(char path[64], const char *content);
+/* Appends s to the file at path through a separate O_APPEND fd. */
+void	append_str(const char *path, const char *s);
+/* Writes all of s to fd (e.g. the write end of a pipe). */
+void	write_str(int fd, const char *s);
+
+/*
+** Forks a child process that calls get_next_line on fds[0], fds[1], ... in
+** turn, until it has n lines from each fd (or NULL), frees every line and
+** exits, leaving whatever is in its static stash behind. This is a program
+** that stops reading early. The fds are shared with the child, so their
+** offset moves. out[i] gets everything the child read from fds[i]
+** (malloc'd, free it). Returns the child's wait status.
+*/
+int		child_reads(const int *fds, size_t nfds, int n, char **out);
+/* Describes a wait status that is not a clean exit(0). */
+const char	*status_str(int status);
+/* malloc'd copy of the first n lines of s (fewer if s has fewer). */
+char	*first_lines(const char *s, int n);
+
 /* malloc'd string: n copies of c (no '\0' inside), optional trailing '\n'. */
 char	*repeat_char(char c, size_t n, int newline);
 

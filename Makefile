@@ -15,7 +15,8 @@ VALGRIND	= RUNNER="valgrind -q --leak-check=full \
 			  --error-exitcode=42" TEST_TIMEOUT=60 \
 			  BUFFER_SIZES="$${BUFFER_SIZES:-1 42 9999}"
 
-.PHONY: all main main_bonus test bonus valgrind valgrind_bonus clean fclean re
+.PHONY: all main main_bonus test mandatory bonus program valgrind \
+		valgrind_bonus valgrind_program clean fclean re remove
 
 # `make` builds ./test, the interactive reader:  exec 10< file; ./test 10
 # (always recompiled: the binary shares its name with the `test` target).
@@ -28,13 +29,20 @@ main:
 main_bonus:
 	$(CC) $(CFLAGS) -DGNL_BONUS main.c $(B_SRC) -o test_bonus
 
-# Checks + mandatory tests for every BUFFER_SIZE.
+# Checks + mandatory tests + program tests for every BUFFER_SIZE.
 test:
 	@./run_tests.sh mandatory
+
+mandatory: test
 
 # Everything in `test`, plus mandatory + multi-fd tests on the bonus files.
 bonus:
 	@./run_tests.sh bonus
+
+# Only the program tests: main.c run from the shell on shared fds, pipes,
+# appended files and binaries.
+program:
+	@./run_tests.sh program
 
 # The same suites under valgrind (invalid reads/writes, leaks).
 valgrind:
@@ -43,6 +51,9 @@ valgrind:
 valgrind_bonus:
 	@$(VALGRIND) ./run_tests.sh bonus
 
+valgrind_program:
+	@$(VALGRIND) ./run_tests.sh program
+
 clean:
 	rm -rf bin
 
@@ -50,3 +61,11 @@ fclean: clean
 	rm -f test test_bonus
 
 re: fclean all
+
+# Deletes this whole tester directory (e.g. before submitting). Refuses
+# unless the directory really is the tester, so it can't wipe anything else.
+remove:
+	@test -f "$(CURDIR)/run_tests.sh" && test -f "$(CURDIR)/gnl_utils.h" \
+		|| { echo "refusing: $(CURDIR) does not look like the tester"; exit 1; }
+	@echo "Removing $(CURDIR)"
+	@rm -rf -- "$(CURDIR)"

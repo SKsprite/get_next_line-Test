@@ -24,6 +24,15 @@ int		finish(const char *title);
 void	report_fail(const char *file, int line, const char *fmt, ...)
 		__attribute__((format(printf, 3, 4)));
 
+/* 1 when the test runs under valgrind (it preloads its vgpreload_*.so). */
+int		under_valgrind(void);
+
+/*
+** Ends the current case as [SKIP] (not counted as passed or failed) and
+** prints why. Only call it from inside a case run by run_case().
+*/
+void	skip_case(const char *why) __attribute__((noreturn));
+
 # define CHECK(cond, ...) do { \
 	if (!(cond)) \
 		report_fail(__FILE__, __LINE__, __VA_ARGS__); \
@@ -33,6 +42,13 @@ void	report_fail(const char *file, int line, const char *fmt, ...)
 	long long g__ = (long long)(got); \
 	long long e__ = (long long)(exp); \
 	CHECK(g__ == e__, "%s: expected %lld, got %lld", #got, e__, g__); \
+} while (0)
+
+# define CHECK_STR(got, exp) do { \
+	const char *g__ = (got); \
+	const char *e__ = (exp); \
+	CHECK(g__ && e__ && strcmp(g__, e__) == 0, "%s: expected %s, got %s", \
+		#got, e__ ? show_str(e__) : "NULL", g__ ? show_str(g__) : "NULL"); \
 } while (0)
 
 #endif

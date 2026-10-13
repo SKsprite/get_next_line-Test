@@ -3,6 +3,8 @@
 #include <limits.h>
 #include <signal.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 void	*__real_malloc(size_t size);
 void	__real_free(void *p);
@@ -287,4 +289,173 @@ size_t	drain(int fd, size_t max)
 		n++;
 	}
 	return (n);
+}
+
+void	write_str(int fd, const char *s)
+{
+	write_all(fd, s, strlen(s));
+}
+
+void	make_tmp_file(char path[64], const char *content)
+{
+	const char	*dir;
+	int			fd;
+
+	dir = getenv("TMPDIR");
+	snprintf(path, 64, "%s/gnl_test_XXXXXX", dir && strlen(dir) < 40 ? dir : "/tmp");
+	fd = mkstemp(path);
+	if (fd < 0)
+	{
+		perror("mkstemp");
+		exit(2);
+	}
+	write_str(fd, content);
+	close(fd);
+}
+
+void	append_str(const char *path, const char *s)
+{
+	int	fd;
+
+	fd = open(path, O_WRONLY | O_APPEND);
+	if (fd < 0)
+	{
+		perror(path);
+		exit(2);
+	}
+	write_str(fd, s);
+	close(fd);
+}
+
+/* Child -> parent record: fd index (1 byte), length, the line's bytes. */
+static void	send_line(int out, unsigned char idx, const char *line)
+{
+	size_t	len;
+
+	len = strlen(line);
+	write_all(out, (const char *)&idx, 1);
+	write_all(out, (const char *)&len, sizeof(len));
+	write_all(out, line, len);
+}
+
+static void	child_body(int out, const int *fds, size_t nfds, int n)
+{
+	char	*line;
+	int		done[256];
+	size_t	active;
+
+	memset(done, 0, sizeof(done));
+	active = nfds;
+	for (int round = 0; round < n && active > 0; round++)
+	{
+		for (size_t i = 0; i < nfds; i++)
+		{
+			if (done[i])
+				continue ;
+			line = gnl(fds[i]);
+			if (!line)
+			{
+				done[i] = 1;
+				active--;
+				continue ;
+			}
+			send_line(out, (unsigned char)i, line);
+			free(line);
+		}
+	}
+	close(out);
+	exit(0);
+}
+
+static int	read_exact(int fd, void *buf, size_t n)
+{
+	ssize_t	r;
+	char	*p;
+
+	p = buf;
+	while (n > 0)
+	{
+		r = read(fd, p, n);
+		if (r <= 0)
+			return (0);
+		p += r;
+		n -= (size_t)r;
+	}
+	return (1);
+}
+
+static void	append_mem(char **dst, size_t *dlen, const char *src, size_t n)
+{
+	*dst = realloc(*dst, *dlen + n + 1);
+	memcpy(*dst + *dlen, src, n);
+	*dlen += n;
+	(*dst)[*dlen] = '\0';
+}
+
+int	child_reads(const int *fds, size_t nfds, int n, char **out)
+{
+	int				p[2];
+	pid_t			pid;
+	int				status;
+	unsigned char	idx;
+	size_t			len;
+	size_t			lens[256];
+	char			*buf;
+
+	fflush(stdout);
+	if (nfds > 256 || pipe(p) < 0 || (pid = fork()) < 0)
+		exit(2);
+	if (pid == 0)
+	{
+		close(p[0]);
+		child_body(p[1], fds, nfds, n);
+	}
+	close(p[1]);
+	for (size_t i = 0; i < nfds; i++)
+	{
+		out[i] = calloc(1, 1);
+		lens[i] = 0;
+	}
+	while (read_exact(p[0], &idx, 1) && read_exact(p[0], &len, sizeof(len)))
+	{
+		buf = malloc(len + 1);
+		if (idx >= nfds || !read_exact(p[0], buf, len))
+		{
+			free(buf);
+			break ;
+		}
+		append_mem(&out[idx], &lens[idx], buf, len);
+		free(buf);
+	}
+	close(p[0]);
+	waitpid(pid, &status, 0);
+	return (status);
+}
+
+const char	*status_str(int status)
+{
+	static char	buf[128];
+
+	if (WIFSIGNALED(status))
+		snprintf(buf, sizeof(buf), "killed by signal %d (%s)",
+			WTERMSIG(status), strsignal(WTERMSIG(status)));
+	else if (WEXITSTATUS(status) == 42)
+		snprintf(buf, sizeof(buf), "valgrind reported errors in the child "
+			"(see above)");
+	else
+		snprintf(buf, sizeof(buf), "exit status %d", WEXITSTATUS(status));
+	return (buf);
+}
+
+char	*first_lines(const char *s, int n)
+{
+	const char	*p;
+
+	p = s;
+	while (n > 0 && *p)
+	{
+		if (*p++ == '\n')
+			n--;
+	}
+	return (strndup(s, (size_t)(p - s)));
 }
