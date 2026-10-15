@@ -15,8 +15,9 @@ VALGRIND	= RUNNER="valgrind -q --leak-check=full \
 			  --error-exitcode=42" TEST_TIMEOUT=60 \
 			  BUFFER_SIZES="$${BUFFER_SIZES:-1 42 9999}"
 
-.PHONY: all main main_bonus test mandatory bonus program valgrind \
-		valgrind_bonus valgrind_program clean fclean re remove
+.PHONY: all main main_bonus test mandatory bonus bonus_only program valgrind \
+		valgrind_bonus valgrind_bonus_only valgrind_program clean fclean re \
+		remove
 
 # `make` builds ./test, the interactive reader:  exec 10< file; ./test 10
 # (always recompiled: the binary shares its name with the `test` target).
@@ -39,6 +40,10 @@ mandatory: test
 bonus:
 	@./run_tests.sh bonus
 
+# Only the _bonus files: checks, mandatory + multi-fd + program tests.
+bonus_only:
+	@./run_tests.sh bonus_only
+
 # Only the program tests: main.c run from the shell on shared fds, pipes,
 # appended files and binaries.
 program:
@@ -50,6 +55,9 @@ valgrind:
 
 valgrind_bonus:
 	@$(VALGRIND) ./run_tests.sh bonus
+
+valgrind_bonus_only:
+	@$(VALGRIND) ./run_tests.sh bonus_only
 
 valgrind_program:
 	@$(VALGRIND) ./run_tests.sh program

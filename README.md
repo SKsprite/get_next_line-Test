@@ -29,7 +29,7 @@ The tests compile your `.c` files directly. They never change them.
 get_next_line/
 ├── get_next_line.c, get_next_line_utils.c, get_next_line.h
 ├── get_next_line_bonus.c, get_next_line_utils_bonus.c, get_next_line_bonus.h
-└── gnl_test/
+└── get_next_line-Test/
     ├── Makefile
     ├── main.c            <- the interactive reader (./test)
     ├── run_tests.sh      <- checks, C suites and program tests per BUFFER_SIZE
@@ -53,7 +53,7 @@ make test GNL_DIR=/path/to/get_next_line
 
 ## Usage
 
-Run these from inside `gnl_test/`:
+Run these from inside `get_next_line-Test/`:
 
 | Command | What it does |
 |---|---|
@@ -62,9 +62,11 @@ Run these from inside `gnl_test/`:
 | `make main_bonus` | Builds `./test_bonus` from the `_bonus` files (several fds at once) |
 | `make test` (or `make mandatory`) | Checks, mandatory C tests and program tests, for every buffer size |
 | `make bonus` | Everything in `make test`, then the same on the `_bonus` files, plus the multi-fd tests |
+| `make bonus_only` | Only the `_bonus` files: their checks, the mandatory tests, the multi-fd tests and the program tests on them (skips the mandatory files) |
 | `make program` | Only the program tests (mandatory files) |
 | `make valgrind` | `make test` under valgrind |
 | `make valgrind_bonus` | `make bonus` under valgrind |
+| `make valgrind_bonus_only` | `make bonus_only` under valgrind |
 | `make valgrind_program` | `make program` under valgrind |
 | `make clean` / `make fclean` | Deletes `bin/` / also deletes `./test` and `./test_bonus` |
 | `make remove` | Deletes the whole tester folder (do this before you submit). Afterwards, `cd ..` |
@@ -86,23 +88,23 @@ and `./run_tests.sh bonus`). The script first changes into its own folder.
 So all of these run the same tests on the same files:
 
 ```sh
-cd gnl_test && make test
-make -C gnl_test test          # from your project folder
-./gnl_test/run_tests.sh        # the mode defaults to mandatory
+cd get_next_line-Test && make test
+make -C get_next_line-Test test   # from your project folder
+./get_next_line-Test/run_tests.sh # the mode defaults to mandatory
 ```
 
 The differences:
 
 | | `make` | `run_tests.sh` |
 |---|---|---|
-| Choosing the suite | target: `test`, `bonus`, `program`, `valgrind`, … | argument: `mandatory`, `bonus` or `program` |
+| Choosing the suite | target: `test`, `bonus`, `bonus_only`, `program`, `valgrind`, … | argument: `mandatory`, `bonus`, `bonus_only` or `program` |
 | Valgrind | `make valgrind` sets the valgrind command, the 60 s timeout and the smaller buffer sizes for you | you set `RUNNER="valgrind ..."` yourself |
 | Settings | `make test BUFFER_SIZES="1 42"` | `BUFFER_SIZES="1 42" ./run_tests.sh` |
 | When tests fail | adds a `make: *** ... Error 1` line | only the test output |
 
-Both change into `gnl_test/` first, so a relative `GNL_DIR` is resolved from
+Both change into `get_next_line-Test/` first, so a relative `GNL_DIR` is resolved from
 there, not from the folder you typed the command in.
-`GNL_DIR=../other_gnl` means `gnl_test/../other_gnl`.
+`GNL_DIR=../other_gnl` means `get_next_line-Test/../other_gnl`.
 
 ## The interactive reader: `./test`
 

@@ -1,8 +1,10 @@
 #!/bin/sh
-# Usage: ./run_tests.sh [mandatory|bonus|program]   (default: mandatory)
+# Usage: ./run_tests.sh [mandatory|bonus|bonus_only|program]  (default: mandatory)
 #   mandatory  checks + C tests + program tests on get_next_line.c / _utils.c
 #   bonus      everything above, plus the same on the _bonus files, plus the
 #              multi-fd tests
+#   bonus_only only the _bonus files: their checks, the mandatory tests, the
+#              multi-fd tests and the program tests on them
 #   program    only the program tests (main.c run from the shell)
 # Env: GNL_DIR=path         where your get_next_line files are (default ..)
 #      BUFFER_SIZES="1 42"  buffer sizes to test ("default" = no -D flag)
@@ -29,8 +31,8 @@ B_HDR="get_next_line_bonus.h"
 ALLOWED="read malloc free"
 
 case "$MODE" in
-	mandatory|bonus|program) ;;
-	*) echo "usage: $0 [mandatory|bonus|program]"; exit 2 ;;
+	mandatory|bonus|bonus_only|program) ;;
+	*) echo "usage: $0 [mandatory|bonus|bonus_only|program]"; exit 2 ;;
 esac
 
 RED="$(printf '\033[31m')"
@@ -402,10 +404,12 @@ if [ "$MODE" = program ]; then
 	for bs in $BUFFER_SIZES; do
 		run_program_suite mandatory "$M_SRC" "$bs" ""
 	done
+elif [ "$MODE" = bonus_only ]; then
+	:
 elif check_files mandatory "$M_SRC" "$M_HDR" 0; then
 	run_all_sizes mandatory "$M_SRC" ""
 fi
-if [ "$MODE" = bonus ]; then
+if [ "$MODE" = bonus ] || [ "$MODE" = bonus_only ]; then
 	if check_files bonus "$B_SRC" "$B_HDR" 1; then
 		run_all_sizes mandatory_on_bonus "$B_SRC" "-DGNL_BONUS"
 	fi
