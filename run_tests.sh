@@ -51,7 +51,10 @@ VG_LOG_DIR=""
 case "$RUNNER" in
 	*--log-file*|*--log-fd*|*--log-socket*) ;;
 	*valgrind*)
-		VG_LOG_DIR="$PWD/bin/valgrind"
+		# Relative (the script cd's to its own directory and the tests never
+		# chdir): $RUNNER is word-split, so an absolute path with a space in
+		# it would break the valgrind command (exit 127).
+		VG_LOG_DIR="bin/valgrind"
 		mkdir -p "$VG_LOG_DIR"
 		rm -f "$VG_LOG_DIR"/*.log
 		RUNNER="$RUNNER --log-file=$VG_LOG_DIR/%p.log"
