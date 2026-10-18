@@ -9,6 +9,10 @@ B_SRC		= $(GNL_DIR)/get_next_line_bonus.c $(GNL_DIR)/get_next_line_utils_bonus.c
 
 export GNL_DIR
 
+# V=1 / V=2: same as run_tests.sh -v / -vv (more detail on each failure).
+# Failure details go to stderr: `make test 2> errors.log`.
+export V
+
 VALGRIND	= RUNNER="valgrind -q --leak-check=full \
 			  --show-leak-kinds=definite,indirect,possible \
 			  --errors-for-leak-kinds=definite,indirect,possible \

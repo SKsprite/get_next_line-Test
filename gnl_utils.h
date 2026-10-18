@@ -85,11 +85,24 @@ void	expect_lines_at(const char *f, int l, int fd, const char **lines,
 /* Calls get_next_line until it returns NULL (at most `max` times). */
 size_t	drain(int fd, size_t max);
 
+/*
+** -v / -vv: lists the blocks get_next_line still owns (size, the call that
+** allocated them, their content).
+*/
+void	report_live_blocks(void);
+/*
+** "malloc #3 (44 bytes) returned NULL during get_next_line call 2": the
+** last failure injected by fail_malloc_at / fail_read_at ("" if none).
+*/
+const char	*last_failure_info(void);
+
 /* Fails the case if get_next_line still owns heap blocks. */
 # define CHECK_NO_LEAK(when) do { \
 	size_t n__ = gnl_live_blocks(); \
 	CHECK(n__ == 0, "%s: %zu block(s) allocated by get_next_line were never" \
 		" freed (static stash not freed at EOF / on error?)", when, n__); \
+	if (n__) \
+		report_live_blocks(); \
 } while (0)
 
 #endif

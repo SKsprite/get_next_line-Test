@@ -399,16 +399,46 @@ static void	read_error_mid_file(void)
 	CHECK_NO_LEAK("right after the read() error");
 }
 
+/*
+** -v / -vv, after a wrong line from a call where a malloc or read() failure
+** was injected: which one failed, the calls so far as a diff (the earlier
+** ones matched `expected`), and how the last line differs.
+*/
+static void	explain_failed_call(const char **expected, size_t i,
+				const char *line, int null_only)
+{
+	const char	*exp[8];
+	const char	*got[8];
+
+	if (verbosity() < 1)
+		return ;
+	if (*last_failure_info())
+		report_note("injected: %s", last_failure_info());
+	for (size_t k = 0; k < i && k < 7; k++)
+	{
+		exp[k] = expected[k];
+		got[k] = expected[k];
+	}
+	exp[i] = null_only ? NULL : expected[i];
+	got[i] = line;
+	if (i < 7)
+		diff_lines(exp, got, i + 1);
+	explain_diff(exp[i], line);
+}
+
 static void	every_read_fails_in_turn(void)
 {
 	/* read() call 1, 2, 3, ... fails. Never crash, never leak. */
 	const char	*content = "abc\ndefghij\nklmnopqrstuvwxyz\nlast";
+	const char	*expected[] = {"abc\n", "defghij\n", "klmnopqrstuvwxyz\n",
+		"last", NULL, NULL, NULL, NULL};
 	char		*line;
 	int			fd;
 	int			triggered;
 
 	for (long n = 1; n < 200; n++)
 	{
+		trace_clear();
 		fd = open_str(content);
 		fail_read_at(n);
 		for (int calls = 0; calls < 20; calls++)
@@ -418,6 +448,8 @@ static void	every_read_fails_in_turn(void)
 			{
 				CHECK(line == NULL, "read() call %ld returned -1 but "
 					"get_next_line returned %s", n, show_str(line));
+				if (line && calls < 7)
+					explain_failed_call(expected, (size_t)calls, line, 1);
 				free(line);
 				break ;
 			}
@@ -454,6 +486,7 @@ static void	every_malloc_fails_in_turn(void)
 
 	for (long n = 1; n < 500; n++)
 	{
+		trace_clear();
 		fd = open_str(content);
 		fail_malloc_at(n);
 		for (size_t i = 0; i < 4; i++)
@@ -462,13 +495,20 @@ static void	every_malloc_fails_in_turn(void)
 			if (malloc_failed())
 			{
 				CHECK(!line || strcmp(line, expected[i]) == 0,
-					"malloc %ld failed: expected NULL (or %s), got %s",
-					n, show_str(expected[i]), show_str(line));
+					"malloc %ld failed: expected NULL (or %s), got %s%s",
+					n, show_str(expected[i]), show_str(line),
+					line && strcmp(line, expected[i]) != 0
+					? " (when malloc fails, return NULL and free the stash, not "
+					"a line built from what you have so far)" : "");
+				if (line && strcmp(line, expected[i]) != 0)
+					explain_failed_call(expected, i, line, 0);
 				free(line);
 				break ;
 			}
 			CHECK(line && strcmp(line, expected[i]) == 0,
 				"expected %s, got %s", show_str(expected[i]), show_str(line));
+			if (!line || strcmp(line, expected[i]) != 0)
+				explain_failed_call(expected, i, line, 0);
 			if (!line)
 				break ;
 			free(line);
@@ -499,6 +539,7 @@ static void	strict_malloc_failure_frees_stash(void)
 
 	for (long n = 1; n < 500; n++)
 	{
+		trace_clear();
 		fd = open_str(content);
 		fail_malloc_at(n);
 		for (int i = 0; i < 5; i++)
@@ -509,6 +550,11 @@ static void	strict_malloc_failure_frees_stash(void)
 				CHECK(line || gnl_live_blocks() == 0, "malloc %ld failed and "
 					"get_next_line returned NULL, but %zu block(s) are still "
 					"allocated (stash not freed on error)", n, gnl_live_blocks());
+				if (!line && gnl_live_blocks() && verbosity() >= 1)
+				{
+					report_note("injected: %s", last_failure_info());
+					report_live_blocks();
+				}
 				free(line);
 				break ;
 			}

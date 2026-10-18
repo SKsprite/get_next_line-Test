@@ -1,5 +1,6 @@
 #!/bin/sh
-# Usage: ./run_tests.sh [mandatory|bonus|bonus_only|program]  (default: mandatory)
+# Usage: ./run_tests.sh [-v|-vv] [mandatory|bonus|bonus_only|program]
+#        (default: mandatory)
 #   mandatory  checks + C tests + program tests on get_next_line.c / _utils.c
 #   bonus      everything above, plus the same on the _bonus files, plus the
 #              multi-fd tests
@@ -10,10 +11,40 @@
 #      BUFFER_SIZES="1 42"  buffer sizes to test ("default" = no -D flag)
 #      RUNNER="valgrind ..." wraps each test binary
 #      TEST_TIMEOUT=N       seconds before a single case is killed (default 5)
+#      V=1 / V=2            same as -v / -vv (what `make test V=1` sets)
+# -v, --verbose  more detail on each failure: a diff, how the line differs,
+#                which malloc/read failed, leaked blocks, and the last 20
+#                get_next_line events (calls, malloc, free, read)
+# -vv            all of it in full, with the whole trace of the failing case
+# [OK]/[KO] lines and the summary go to stdout; every failure detail goes to
+# stderr, so `./run_tests.sh 2> errors.log` keeps the console short.
 
 cd "$(dirname "$0")" || exit 1
 
-MODE="${1:-mandatory}"
+usage() {
+	echo "usage: $0 [-v|-vv|--verbose] [mandatory|bonus|bonus_only|program]"
+}
+VERBOSE="${V:-0}"
+MODE=""
+for arg in "$@"; do
+	case "$arg" in
+		-v|--verbose) VERBOSE=$((VERBOSE + 1)) ;;
+		-vv) VERBOSE=2 ;;
+		-h|--help) usage; exit 0 ;;
+		-*) usage >&2; exit 2 ;;
+		*)
+			[ -z "$MODE" ] || { usage >&2; exit 2; }
+			MODE="$arg"
+			;;
+	esac
+done
+case "$VERBOSE" in
+	0|1|2) ;;
+	*[!0-9]*|'') echo "V must be 0, 1 or 2 (got '$VERBOSE')" >&2; exit 2 ;;
+	*) VERBOSE=2 ;;
+esac
+export VERBOSE
+MODE="${MODE:-mandatory}"
 GNL_DIR="${GNL_DIR:-..}"
 BUFFER_SIZES="${BUFFER_SIZES:-default 1 2 3 7 42 1024 9999 10000000}"
 TEST_TIMEOUT="${TEST_TIMEOUT:-5}"
@@ -32,7 +63,7 @@ ALLOWED="read malloc free"
 
 case "$MODE" in
 	mandatory|bonus|bonus_only|program) ;;
-	*) echo "usage: $0 [mandatory|bonus|bonus_only|program]"; exit 2 ;;
+	*) usage >&2; exit 2 ;;
 esac
 
 RED="$(printf '\033[31m')"
@@ -82,8 +113,19 @@ broken=""
 ok()   { echo "  ${GREEN}[OK]${RESET} $1"; }
 ko()   { echo "  ${RED}[KO]${RESET} $1"; check_failed=1; }
 warn() { echo "  ${YELLOW}[!!]${RESET} $1"; }
-indent() { sed 's/^/      /' | head -n "${1:-15}"; }
+# indent [N]: indents stdin, keeping N lines (at least 60 with -v, all with
+# -vv) and saying how many were cut.
+indent() {
+	n="${1:-15}"
+	[ "$VERBOSE" -ge 1 ] && [ "$n" -lt 60 ] && n=60
+	[ "$VERBOSE" -ge 2 ] && n=1000000000
+	awk -v n="$n" '{ if (NR <= n) print "      " $0 }
+		END { if (NR > n) printf "      ... %d more line(s) (-v / -vv show more)\n", NR - n }'
+}
 count() { set -- $1; echo $#; }
+# err_header <what>: names the failure on stderr when it is not the terminal
+# (2> file), where the [KO] line on stdout is not next to it.
+err_header() { [ -t 2 ] || echo "==== $1 ===="; }
 
 # ------------------------------------------------------------------ checks
 # check_files <label> <sources> <header> <is_bonus>
@@ -128,13 +170,16 @@ check_files() {
 			ok "builds with: $name"
 		else
 			ko "does not build with: $name"
-			indent < "$log"
-			if grep -q '"BUFFER_SIZE" redefined\|BUFFER_SIZE.* macro redefined' "$log"; then
-				echo "      ${YELLOW}hint: wrap the default in #ifndef BUFFER_SIZE / # define BUFFER_SIZE n / #endif${RESET}"
-			fi
-			if grep -q "BUFFER_SIZE.*undeclared" "$log"; then
-				echo "      ${YELLOW}hint: give BUFFER_SIZE a default value in $hdr (inside #ifndef BUFFER_SIZE)${RESET}"
-			fi
+			{
+				err_header "checks: $label: does not build with: $name"
+				indent < "$log"
+				if grep -q '"BUFFER_SIZE" redefined\|BUFFER_SIZE.* macro redefined' "$log"; then
+					echo "      ${YELLOW}hint: wrap the default in #ifndef BUFFER_SIZE / # define BUFFER_SIZE n / #endif${RESET}"
+				fi
+				if grep -q "BUFFER_SIZE.*undeclared" "$log"; then
+					echo "      ${YELLOW}hint: give BUFFER_SIZE a default value in $hdr (inside #ifndef BUFFER_SIZE)${RESET}"
+				fi
+			} >&2
 		fi
 	done
 
@@ -182,8 +227,8 @@ check_files() {
 		if [ -z "$norm" ]; then
 			ok "norminette"
 		else
-			ko "norminette errors:"
-			echo "$norm" | indent 20
+			ko "norminette errors (on stderr)"
+			{ err_header "checks: $label: norminette"; echo "$norm" | indent 20; } >&2
 		fi
 	else
 		warn "norminette not installed: Norm not checked"
@@ -212,21 +257,25 @@ run_suite() {
 			-o "$bin" $WRAP >"$log" 2>&1; then
 		echo "${BOLD}$name (BUFFER_SIZE=$bs)${RESET}"
 		echo "  ${RED}[BUILD FAIL]${RESET} could not compile the tests with your files"
-		indent < "$log"
-		if grep -q '"BUFFER_SIZE" redefined\|BUFFER_SIZE.* macro redefined' "$log"; then
-			echo "      ${YELLOW}hint: wrap the default in #ifndef BUFFER_SIZE / # define BUFFER_SIZE n / #endif${RESET}"
-		fi
+		{
+			err_header "$name (BUFFER_SIZE=$bs): build failed"
+			[ "$VERBOSE" -ge 1 ] && echo "      command: $CC $TFLAGS $extra $(bs_flag "$bs") $test_src $UTILS$files -o $bin $WRAP"
+			indent < "$log"
+			if grep -q '"BUFFER_SIZE" redefined\|BUFFER_SIZE.* macro redefined' "$log"; then
+				echo "      ${YELLOW}hint: wrap the default in #ifndef BUFFER_SIZE / # define BUFFER_SIZE n / #endif${RESET}"
+			fi
+		} >&2
 		echo
 		broken="$broken $name[$bs]"
 		return
 	fi
-	VG_CONTEXT="$name (BUFFER_SIZE=$bs)" $RUNNER "./$bin"
+	TEST_CONTEXT="$name (BUFFER_SIZE=$bs)" $RUNNER "./$bin"
 	status=$?
 	vg_dump "$name (BUFFER_SIZE=$bs)"
 	if [ $status -eq 0 ]; then
 		passed="$passed $name[$bs]"
 	else
-		[ $status -eq 42 ] && echo "  ${RED}valgrind reported memory errors (log on stderr)${RESET}"
+		[ $status -eq 42 ] && echo "  ${RED}valgrind reported memory errors (log on stderr)${RESET}" >&2
 		failed="$failed $name[$bs]"
 	fi
 }
@@ -255,14 +304,47 @@ prog_failed() {
 	esac
 }
 
+# -v: where ./test comes from, to rerun a failing command by hand.
+explain_cmd() {
+	[ "$VERBOSE" -ge 1 ] || return 0
+	echo "      command: $1"
+	echo "      (./test here is $prog: main.c built with BUFFER_SIZE=$bs; run it from $PWD)"
+}
+
+# explain_output <expected> <got>: sizes, first difference (-v), bytes (-vv)
+explain_output() {
+	[ "$VERBOSE" -ge 1 ] || return 0
+	echo "      expected $(wc -c < "$1") bytes in $(wc -l < "$1") line(s), got $(wc -c < "$2") bytes in $(wc -l < "$2") line(s)"
+	first=$(LC_ALL=C cmp "$1" "$2" 2>&1 | head -n 1)
+	echo "      cmp: ${first#cmp: }"
+	[ "$VERBOSE" -ge 2 ] || return 0
+	# cmp: "differ: byte N" or "char N" (1-based), or "EOF on f after byte N"
+	case "$first" in
+		*EOF*after*) off=$(echo "$first" | sed -n 's/.*after [a-z]* \([0-9]*\).*/\1/p') ;;
+		*) off=$(echo "$first" | sed -n 's/.*differ: [a-z]* \([0-9]*\).*/\1/p'); off=$((${off:-1} - 1)) ;;
+	esac
+	off=${off:-0}
+	start=$((off > 16 ? off - 16 : 0))
+	echo "      expected, bytes $start to $((start + 47)):"
+	tail -c +$((start + 1)) "$1" | head -c 48 | od -An -c | sed 's/^/        /'
+	echo "      got, bytes $start to $((start + 47)):"
+	tail -c +$((start + 1)) "$2" | head -c 48 | od -An -c | sed 's/^/        /'
+}
+
 # pcase <name> <status> <expected file> <output file>
 pcase() {
 	if [ "$2" -ne 0 ]; then
 		ko "$1 -> $(prog_failed "$2")"
+		[ "$VERBOSE" -ge 1 ] && { err_header "program $label (BUFFER_SIZE=$bs): $1"; explain_cmd "$1"; } >&2
 	elif [ -n "$3" ] && ! cmp -s "$3" "$4"; then
 		ko "$1"
-		echo "      ${RED}->${RESET} output differs from the expected output:"
-		diff "$3" "$4" 2>&1 | indent 8
+		{
+			err_header "program $label (BUFFER_SIZE=$bs): $1"
+			echo "      ${RED}->${RESET} output differs from the expected output (diff expected got):"
+			explain_cmd "$1"
+			explain_output "$3" "$4"
+			diff "$3" "$4" 2>&1 | indent 8
+		} >&2
 	else
 		ok "$1"
 	fi
@@ -308,7 +390,7 @@ run_program_suite() {
 	if ! $CC $CFLAGS -g -I"$GNL_DIR" $extra $(bs_flag "$bs") main.c $files \
 			-o "$prog" >"$log" 2>&1; then
 		echo "  ${RED}[BUILD FAIL]${RESET} could not compile main.c with your files"
-		indent < "$log"
+		{ err_header "program $label (BUFFER_SIZE=$bs): build failed"; indent < "$log"; } >&2
 		echo
 		broken="$broken program_$label[$bs]"
 		return
@@ -356,7 +438,12 @@ run_program_suite() {
 				tail -c +$((pos + 1)) files/many_lines.txt | head -n 3 > "$exp"
 				if ! cmp -s "$exp" "$out"; then
 					ko "5 programs on one fd: program $run (fd offset $pos) printed the wrong lines"
-					diff "$exp" "$out" | indent 8; good=0; break
+					{
+						err_header "program $label (BUFFER_SIZE=$bs): 5 programs on one fd"
+						explain_output "$exp" "$out"
+						diff "$exp" "$out" | indent 8
+					} >&2
+					good=0; break
 				fi
 			fi
 		done

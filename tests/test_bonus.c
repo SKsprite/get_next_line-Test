@@ -298,6 +298,7 @@ static void	interleaved_malloc_failures(void)
 
 	for (long n = 1; n < 200; n++)
 	{
+		trace_clear();
 		a = open_str("a1\na2\na3\n");
 		b = open_str("b1\nb2\nb3\n");
 		expect_line(a, "a1\n");
@@ -344,6 +345,13 @@ static void	pipes_slow_interleaved(void)
 
 #define RR_FDS 3
 
+static int	same_or_null(const char *a, const char *b)
+{
+	if (!a || !b)
+		return (a == b);
+	return (strcmp(a, b) == 0);
+}
+
 static void	malloc_failures_round_robin(void)
 {
 	/*
@@ -364,6 +372,7 @@ static void	malloc_failures_round_robin(void)
 
 	for (long n = 1; n < 500; n++)
 	{
+		trace_clear();
 		for (int i = 0; i < RR_FDS; i++)
 		{
 			fds[i] = open_str(text[i]);
@@ -388,6 +397,12 @@ static void	malloc_failures_round_robin(void)
 						"failed on another fd: fd %c expected %s, got %s", n,
 						'a' + i, lines[i][next[i]] ? show_str(lines[i][next[i]])
 						: "NULL", show_str(got));
+				if (!tainted[i] && !same_or_null(got, lines[i][next[i]]))
+				{
+					if (*last_failure_info())
+						report_note("injected: %s", last_failure_info());
+					explain_diff(lines[i][next[i]], got);
+				}
 				if (got && next[i] < 3)
 					next[i]++;
 				free(got);

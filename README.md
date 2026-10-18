@@ -77,6 +77,7 @@ Environment variables:
 |---|---|---|
 | `BUFFER_SIZES` | `default 1 2 3 7 42 1024 9999 10000000` (valgrind: `1 42 9999`) | Buffer sizes the suites are compiled with. `default` compiles **without** `-D BUFFER_SIZE`, so your header's value is used |
 | `TEST_TIMEOUT` | `5` (valgrind: `60`) | Seconds before a case is killed |
+| `V` | `0` | `1` or `2`: the same as `-v` / `-vv` (see [Verbose output](#verbose-output--v--vv)) |
 | `GNL_DIR` | `..` | Where your files are |
 
 For example, `BUFFER_SIZES="1 5" make test` runs a quick check.
@@ -100,6 +101,7 @@ The differences:
 | Choosing the suite | target: `test`, `bonus`, `bonus_only`, `program`, `valgrind`, … | argument: `mandatory`, `bonus`, `bonus_only` or `program` |
 | Valgrind | `make valgrind` sets the valgrind command, the 60 s timeout and the smaller buffer sizes for you | you set `RUNNER="valgrind ..."` yourself |
 | Settings | `make test BUFFER_SIZES="1 42"` | `BUFFER_SIZES="1 42" ./run_tests.sh` |
+| More detail on failures | `make test V=1` / `make test V=2` (`make -v` is make's own flag) | `./run_tests.sh -v` / `-vv` (or `--verbose`, twice for `-vv`) |
 | When tests fail | adds a `make: *** ... Error 1` line | only the test output |
 
 Both change into `get_next_line-Test/` first, so a relative `GNL_DIR` is resolved from
@@ -311,6 +313,23 @@ Your code keeps calling plain `malloc`/`read`/`free` and needs no changes.
 
 ## Reading the output
 
+The `[OK]` / `[KO]` / `[SKIP]` lines and the summary go to **stdout**.
+Everything that explains a failure goes to **stderr**: the `->` messages,
+diffs, build errors, norminette errors, valgrind reports and, with
+`-v`/`-vv`, the traces. On the console the two are mixed in order, so the
+details are printed right under their KO line. To keep the console short and
+read the details later:
+
+```sh
+make test 2> errors.log          # console: OK/KO + summary; errors.log: why
+./run_tests.sh -v bonus 2> errors.log
+```
+
+In the file, each failure starts with a header naming it,
+`==== mandatory (BUFFER_SIZE=42): several lines (with / without final \n) ====`,
+since its KO line is not next to it there. These headers appear only when
+stderr is not the terminal.
+
 ```
 mandatory tests (BUFFER_SIZE=1)
   [OK] empty file / empty pipe -> NULL
@@ -327,7 +346,9 @@ mandatory: 28/31 passed
   open file limit is too low for fd 1023). It counts as neither passed nor
   failed.
 - **[KO]**: the case failed. The `->` lines give the expected and the
-  actual line. Non-printable bytes appear as `\xNN`.
+  actual line. `\n`, `\t` and `\r` are shown escaped; other non-printable
+  bytes appear as `\xNN`. Strings are cut after 60 bytes (300 with `-v`,
+  4000 with `-vv`). Run again with `-v` to see *how* it fails (see below).
 - **-> SEGFAULT / ABORT**: your code crashed. ABORT usually means a double
   free or heap corruption, e.g. a `malloc` one byte too small.
   A crash only at `BUFFER_SIZE=10000000` usually means
@@ -343,6 +364,9 @@ mandatory: 28/31 passed
   the KO line, headed `==== valgrind: <suite>: <test> ====`, with the file
   and line. Use `make valgrind 2> valgrind.log` to keep the console to the
   OK/KO lines and collect every report, labelled, in `valgrind.log`.
+- **-> SEGFAULT / TIMEOUT with `-v`**: the trace shows what `get_next_line`
+  was doing right before the crash or the timeout (e.g. a `read` returning
+  0 over and over).
 - **[BUILD FAIL]**: your files don't compile with the tests. The compiler
   errors are shown, sometimes with a hint, e.g. for a `BUFFER_SIZE` that
   is defined without `#ifndef`.
@@ -350,6 +374,93 @@ mandatory: 28/31 passed
 The summary at the end lists each suite by name, with the buffer size in
 brackets (`mandatory[42]`). `make test` / `make bonus` exit non-zero if
 anything failed.
+
+### Common messages
+
+- **`malloc N failed: expected NULL (or "…"), got "…"`**
+  (`every malloc() fails in turn`): during that call the N-th `malloc` inside
+  `get_next_line` returned `NULL`, and your function still returned a line,
+  but not the right one: usually a partial line, or `""`. Typically a
+  join/strjoin fails, your code keeps the old stash (or nothing) and builds a
+  line out of it anyway. That data is lost. When a `malloc` fails, free the
+  stash and return `NULL`; don't build a line from what is left.
+- **`malloc N failed and get_next_line returned NULL, but X block(s) are
+  still allocated (stash not freed on error)`** (strict): you did return
+  `NULL`, but the static stash (or the read buffer) is still allocated. A
+  caller stops at the first `NULL`, so that memory is never freed. Valgrind
+  doesn't flag it: the test reads to EOF afterwards (which frees it), and a
+  block still pointed to by a static counts as "still reachable", not a leak.
+  Free and reset the stash on every error return:
+  `return (free(stash), stash = NULL, NULL);`.
+- **`X block(s) allocated by get_next_line were never freed`**: a leak the
+  tester's own tracking found (no valgrind needed). `-v` lists each block:
+  its size, which `get_next_line` call allocated it and what it holds.
+
+## Verbose output (`-v`, `-vv`)
+
+```sh
+./run_tests.sh -v            # or: make test V=1
+./run_tests.sh -vv bonus     # or: make bonus V=2
+make valgrind V=1            # works with every target
+```
+
+Without a flag you get the messages above. `-v` adds, for each failure:
+
+- **a diff.** For one line, expected and got are aligned, with a `^` under
+  the first differing byte and what is wrong there (bytes missing, extra
+  bytes, a different byte). For a sequence of lines, the calls are listed
+  with `-` (expected) / `+` (got), as with `diff`. The program tests show
+  sizes, `cmp`'s first difference, and up to 60 lines of `diff` instead of 8.
+- **what was injected.** E.g. `malloc #3 (4 bytes) returned NULL during
+  get_next_line call 13`.
+- **leaked blocks.** For each block still allocated: size, the call that
+  allocated it, its content (not shown under valgrind).
+- **a trace.** The last 20 things `get_next_line` did before the first
+  failed check, or before a crash or timeout: each call and what it
+  returned, and every `malloc`, `free` and `read` inside it. An injected
+  failure is marked `<== injected failure`, and a `free` of something
+  `get_next_line` never allocated is marked too.
+- for program tests, the command and which binary `./test` is, so you can
+  rerun it by hand. Build logs are shown in full.
+
+`-vv` gives the same with **the whole trace of the failing case** (up to
+2000 events; in the loops that fail one malloc/read after another, the
+trace covers only the iteration that failed). It also shows every leaked
+block, strings up to 4000 bytes, every failure message (not just the first
+10), the full `diff`, and an `od -c` view of the bytes around the first
+difference in program tests.
+
+Example: `-v` on a `get_next_line` that returns what it has when a join
+fails (`BUFFER_SIZE=3`):
+
+```
+  [KO] every malloc() fails in turn: no crash, no leak
+      -> tests/test_mandatory.c:502: malloc 3 failed: expected NULL (or "first line\n"), got "" (when malloc fails, return NULL and free the stash, not a line built from what you have so far)
+         injected: malloc #3 (4 bytes) returned NULL during get_next_line call 13
+         diff, call by call (- expected, + got):
+         -    1  "first line\n"
+         +    1  ""
+         - expected: "first line\n"
+         + got:      ""
+                      ^ byte 0: got ends here, 11 byte(s) missing: "first line\n"
+      trace: last 11 of 11 event(s) up to the first failed check:
+         get_next_line(5)            [call 13]
+             malloc(4) -> block #1
+             read(5, buf, 3) -> 3  "fir"
+             malloc(1) -> block #2
+             malloc(4) -> NULL     <== injected failure (malloc #3)
+             malloc(1) -> block #4
+             malloc(1) -> block #5
+             free(block #2, 1 bytes)
+             free(block #1, 4 bytes)
+             free(block #5, 1 bytes)
+           -> returned ""
+```
+
+`block #N` is the N-th `malloc` of that test (the same N as in
+`malloc N failed`). Here the join's `malloc` (#3) failed, but the code then
+went on to build a line (#4, #5) from an empty stash instead of returning
+`NULL`.
 
 ## What the labels mean
 
