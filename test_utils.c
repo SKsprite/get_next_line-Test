@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <dirent.h>
 
 #define GREEN "\033[32m"
 #define RED "\033[31m"
@@ -150,6 +151,56 @@ static char	*slurp(int fd)
 }
 
 /*
+** Under make valgrind*, run_tests.sh has valgrind write one log per process
+** into $VG_LOG_DIR (--log-file=<dir>/%p.log). After each case the logs of
+** the processes that reported something are printed to stderr under the
+** case's name, then deleted: on the console they show up right under the
+** KO line, and `2> file` sends them to that file instead.
+*/
+static void	dump_valgrind_logs(const char *name)
+{
+	const char		*dir;
+	const char		*context;
+	char			own[32];
+	char			path[4096];
+	char			buf[4096];
+	DIR				*d;
+	struct dirent	*e;
+	FILE			*f;
+	size_t			n;
+	int				tty;
+
+	dir = getenv("VG_LOG_DIR");
+	if (!dir || !*dir || !(d = opendir(dir)))
+		return ;
+	context = getenv("VG_CONTEXT");
+	snprintf(own, sizeof(own), "%d.log", (int)getpid());
+	tty = isatty(STDERR_FILENO);
+	while ((e = readdir(d)))
+	{
+		if (!strstr(e->d_name, ".log") || strcmp(e->d_name, own) == 0)
+			continue ;
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		if (!(f = fopen(path, "r")))
+			continue ;
+		if ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+		{
+			fprintf(stderr, "%s==== valgrind: %s%s%s ====%s\n",
+				tty ? RED : "", context ? context : "", context ? ": " : "",
+				name, tty ? RESET : "");
+			do
+				fwrite(buf, 1, n, stderr);
+			while ((n = fread(buf, 1, sizeof(buf), f)) > 0);
+			fputc('\n', stderr);
+		}
+		fclose(f);
+		unlink(path);
+	}
+	closedir(d);
+	fflush(stderr);
+}
+
+/*
 ** Each case runs in its own child process so a crash or infinite loop
 ** only fails that case instead of killing the whole run.
 */
@@ -199,7 +250,7 @@ void	run_case(const char *name, void (*fn)(void))
 				name, signal_name(WTERMSIG(status)));
 		else if (WEXITSTATUS(status) == 42)
 			printf("  " RED "[KO]" RESET " %s " YELLOW
-				"-> valgrind reported memory errors (see above)" RESET "\n",
+				"-> valgrind reported memory errors (log on stderr)" RESET "\n",
 				name);
 		else
 			printf("  " RED "[KO]" RESET " %s\n", name);
@@ -208,6 +259,7 @@ void	run_case(const char *name, void (*fn)(void))
 		fputs(details, stdout);
 	free(details);
 	fflush(stdout);
+	dump_valgrind_logs(name);
 }
 
 int	finish(const char *title)

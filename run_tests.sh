@@ -42,6 +42,36 @@ BOLD="$(printf '\033[1m')"
 RESET="$(printf '\033[0m')"
 
 mkdir -p bin/check
+
+# Under valgrind, each process logs to its own file in bin/valgrind; after
+# each test the non-empty logs are printed to stderr under the test's name
+# (vg_dump, and run_case() in test_utils.c). They show on the console, and
+# `2> file` puts every valgrind report in that file, labelled.
+VG_LOG_DIR=""
+case "$RUNNER" in
+	*--log-file*|*--log-fd*|*--log-socket*) ;;
+	*valgrind*)
+		VG_LOG_DIR="$PWD/bin/valgrind"
+		mkdir -p "$VG_LOG_DIR"
+		rm -f "$VG_LOG_DIR"/*.log
+		RUNNER="$RUNNER --log-file=$VG_LOG_DIR/%p.log"
+		;;
+esac
+export VG_LOG_DIR
+if [ -t 2 ]; then VG_RED="$(printf '\033[31m')"; VG_RESET="$(printf '\033[0m')"; fi
+
+# vg_dump <test name>: print the valgrind logs written since the last call
+vg_dump() {
+	[ -n "$VG_LOG_DIR" ] || return 0
+	for f in "$VG_LOG_DIR"/*.log; do
+		if [ -s "$f" ]; then
+			echo "${VG_RED}==== valgrind: $1 ====${VG_RESET}"
+			cat "$f"
+			echo
+		fi
+		rm -f "$f"
+	done >&2
+}
 passed=""
 failed=""
 broken=""
@@ -187,12 +217,13 @@ run_suite() {
 		broken="$broken $name[$bs]"
 		return
 	fi
-	$RUNNER "./$bin"
+	VG_CONTEXT="$name (BUFFER_SIZE=$bs)" $RUNNER "./$bin"
 	status=$?
+	vg_dump "$name (BUFFER_SIZE=$bs)"
 	if [ $status -eq 0 ]; then
 		passed="$passed $name[$bs]"
 	else
-		[ $status -eq 42 ] && echo "  ${RED}valgrind reported memory errors above${RESET}"
+		[ $status -eq 42 ] && echo "  ${RED}valgrind reported memory errors (log on stderr)${RESET}"
 		failed="$failed $name[$bs]"
 	fi
 }
@@ -214,7 +245,7 @@ esac
 prog_failed() {
 	case "$1" in
 		124) echo "TIMEOUT (infinite loop or blocked read?)" ;;
-		42) echo "valgrind reported memory errors (see above)" ;;
+		42) echo "valgrind reported memory errors (log on stderr)" ;;
 		139) echo "SEGFAULT" ;;
 		134) echo "ABORT (bad free / heap corruption?)" ;;
 		*) echo "exit status $1" ;;
@@ -232,6 +263,7 @@ pcase() {
 	else
 		ok "$1"
 	fi
+	vg_dump "program $label (BUFFER_SIZE=$bs): $1"
 }
 
 # The lines of the files, one line of each file in turn (like ./test_bonus).
@@ -326,6 +358,7 @@ run_program_suite() {
 			fi
 		done
 		[ $good -eq 1 ] && ok "exec 3< file; 5 x ./test -n 3 3 (programs share the fd)"
+		vg_dump "program $label (BUFFER_SIZE=$bs): 5 programs on one fd"
 	} 3< files/many_lines.txt
 	if [ "$bs" = 1 ]; then
 		{ for run in 1 2 3 4 5; do $TIMEOUT $RUNNER "./$prog" -r -n 3 3; done; } \

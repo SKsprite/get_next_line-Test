@@ -339,7 +339,10 @@ mandatory: 28/31 passed
   `BUFFER_SIZE=1` it can also mean the code is very slow, e.g. re-scanning
   the whole stash from the start on every `read()`.
 - **-> valgrind reported memory errors**: (valgrind runs only) the valgrind
-  report printed just above the KO line shows the file and line.
+  report (leak, invalid read/write, ...) is printed on stderr right under
+  the KO line, headed `==== valgrind: <suite>: <test> ====`, with the file
+  and line. Use `make valgrind 2> valgrind.log` to keep the console to the
+  OK/KO lines and collect every report, labelled, in `valgrind.log`.
 - **[BUILD FAIL]**: your files don't compile with the tests. The compiler
   errors are shown, sometimes with a hint, e.g. for a `BUFFER_SIZE` that
   is defined without `#ifndef`.
